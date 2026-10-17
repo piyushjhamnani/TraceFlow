@@ -1,0 +1,5 @@
+# A separate "folder" inside Kubernetes for everything that belongs to TraceFlow
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traceflow

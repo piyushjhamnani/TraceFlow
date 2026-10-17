@@ -1,0 +1,51 @@
+# Settings for all components (no secrets are needed in this project).
+# After changing a value:  kubectl -n traceflow rollout restart deployment
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traceflow-config
+  namespace: traceflow
+data:
+  LOG_LEVEL: "INFO"
+  # TraceFlow engine - tail-based sampling
+  LATENCY_THRESHOLD_MS: "2000"
+  TRACE_IDLE_TIMEOUT_SECONDS: "10"
+  BASELINE_SAMPLE_RATE: "0.0"
+  KEEP_INCOMPLETE_TRACES: "true"
+  # Microservices -> OpenTelemetry Collector
+  TRACE_EXPORTER: "otlp"
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://otel-collector:4318/v1/traces"
+  OTEL_BSP_SCHEDULE_DELAY: "1000"
+  DEPLOYMENT_ENV: "kubernetes"
+  # Demo
+  PAYMENT_SLOW_DELAY_SECONDS: "5"
+---
+# OpenTelemetry Collector configuration (same as otel/collector-config.yaml)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: traceflow
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      batch:
+        timeout: 1s
+    exporters:
+      debug:
+        verbosity: basic
+      otlphttp/traceflow:
+        endpoint: ${env:TRACEFLOW_ENDPOINT}
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug, otlphttp/traceflow]

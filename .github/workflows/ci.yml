@@ -1,11 +1,12 @@
 # TraceFlow CI/CD pipeline
 #
 #   git push
-#     -> test  : install dependencies + run the automated tests (4 components in parallel)
-#     -> build : validate docker-compose.yml, build all Docker images, start the whole
-#                stack and run an end-to-end smoke test (normal / slow / fail),
-#                then (main branch only) push the images to GitHub Container Registry.
-#   Deployment to Kubernetes: see kubernetes/ and the README.
+#     -> test   : install dependencies + run the automated tests (4 components in parallel)
+#     -> build  : validate docker-compose.yml, build all Docker images, start the whole
+#                 stack and run an end-to-end smoke test (normal / slow / fail),
+#                 then (main branch only) push the images to GitHub Container Registry.
+#     -> deploy : create a Kubernetes cluster (kind), deploy kubernetes/, run the
+#                 end-to-end test inside Kubernetes, demonstrate scaling and self-healing.
 
 name: CI
 
@@ -119,4 +120,120 @@ jobs:
               docker tag "$image:latest" "ghcr.io/$owner/$image:$tag"
               docker push "ghcr.io/$owner/$image:$tag"
             done
+          done
+
+  deploy:
+    name: Deploy to Kubernetes + scaling & self-healing test
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Build Docker images
+        run: docker compose build
+
+      - name: Create Kubernetes cluster (kind)
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: traceflow
+
+      - name: Load images into the cluster
+        run: |
+          kind load docker-image --name traceflow \
+            traceflow-engine:latest \
+            traceflow-user-service:latest \
+            traceflow-order-service:latest \
+            traceflow-payment-service:latest
+
+      - name: Deploy TraceFlow (kubectl apply -k kubernetes/)
+        run: |
+          kubectl apply -k kubernetes/
+          kubectl -n traceflow wait --for=condition=available deployment --all --timeout=300s
+          kubectl -n traceflow get deployments,pods,services,pvc -o wide
+
+      - name: Open the TraceFlow port (kubectl port-forward)
+        run: |
+          kubectl -n traceflow port-forward svc/traceflow 8000:8000 > /tmp/port-forward.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health > /dev/null; then
+              echo "TraceFlow is reachable through the Kubernetes Service"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/port-forward.log
+          exit 1
+
+      - name: End-to-end test inside Kubernetes (normal, slow, fail)
+        run: |
+          set -euo pipefail
+          for mode in normal slow fail; do
+            echo "Sending $mode checkout..."
+            curl -fsS -X POST "http://localhost:8000/api/demo/checkout?mode=$mode"
+            echo
+          done
+          for i in $(seq 1 45); do
+            total=$(curl -fsS http://localhost:8000/api/summary | jq '.total_traces')
+            if [ "$total" -ge 3 ]; then break; fi
+            sleep 2
+          done
+          summary=$(curl -fsS http://localhost:8000/api/summary)
+          echo "$summary" | jq .
+          test "$(echo "$summary" | jq '.total_traces')" -eq 3
+          test "$(echo "$summary" | jq '.retained_traces')" -eq 2
+          echo "Kubernetes end-to-end test passed."
+
+      - name: Scaling - order-service from 1 to 3 pods
+        run: |
+          set -euo pipefail
+          kubectl -n traceflow scale deployment/order-service --replicas=3
+          kubectl -n traceflow rollout status deployment/order-service --timeout=120s
+          kubectl -n traceflow get pods -l app=order-service -o wide
+          ready=$(kubectl -n traceflow get deployment order-service -o jsonpath='{.status.readyReplicas}')
+          test "$ready" -eq 3
+          echo "Scaling passed: 3 order-service pods are ready behind one Service."
+
+      - name: Self-healing - delete a payment-service pod
+        run: |
+          set -euo pipefail
+          old_pod=$(kubectl -n traceflow get pods -l app=payment-service -o jsonpath='{.items[0].metadata.name}')
+          echo "Deleting pod $old_pod to simulate a crash..."
+          kubectl -n traceflow delete pod "$old_pod"
+          for i in $(seq 1 30); do
+            count=$(kubectl -n traceflow get pods -l app=payment-service --no-headers 2>/dev/null | wc -l)
+            if [ "$count" -ge 1 ]; then break; fi
+            sleep 1
+          done
+          kubectl -n traceflow wait --for=condition=ready pod -l app=payment-service --timeout=120s
+          new_pod=$(kubectl -n traceflow get pods -l app=payment-service -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n traceflow get pods -l app=payment-service -o wide
+          test "$new_pod" != "$old_pod"
+          echo "Self-healing passed: Kubernetes replaced $old_pod with $new_pod."
+
+      - name: System still works after scaling and recovery
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST "http://localhost:8000/api/demo/checkout?mode=fail"
+          echo
+          for i in $(seq 1 45); do
+            total=$(curl -fsS http://localhost:8000/api/summary | jq '.total_traces')
+            if [ "$total" -ge 4 ]; then break; fi
+            sleep 2
+          done
+          summary=$(curl -fsS http://localhost:8000/api/summary)
+          echo "$summary" | jq .
+          test "$(echo "$summary" | jq '.total_traces')" -eq 4
+          test "$(echo "$summary" | jq '.error_traces')" -eq 2
+          kubectl -n traceflow get pods -o wide
+          echo "TraceFlow keeps working after scaling and pod recovery."
+
+      - name: Show Kubernetes state on failure
+        if: failure()
+        run: |
+          kubectl -n traceflow get all -o wide || true
+          kubectl -n traceflow describe pods || true
+          for d in traceflow otel-collector user-service order-service payment-service; do
+            echo "===== logs: $d ====="
+            kubectl -n traceflow logs deployment/$d --tail=80 || true
           done

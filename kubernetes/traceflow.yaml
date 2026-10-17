@@ -1,0 +1,88 @@
+# TraceFlow engine + dashboard.
+# Runs as exactly ONE replica on purpose: the tail-sampling buffer is in memory,
+# so all spans of a trace must reach the same instance, and SQLite has one writer.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: traceflow-data
+  namespace: traceflow
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traceflow
+  namespace: traceflow
+  labels:
+    app: traceflow
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # never two pods writing to the same database
+  selector:
+    matchLabels:
+      app: traceflow
+  template:
+    metadata:
+      labels:
+        app: traceflow
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: traceflow
+          image: traceflow-engine:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: traceflow-config
+          env:
+            - name: TRACEFLOW_DB_PATH
+              value: /data/traceflow.db
+            - name: DEMO_CHECKOUT_URL
+              value: http://user-service:8001/users/1/checkout
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 384Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: traceflow-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: traceflow
+  namespace: traceflow
+spec:
+  selector:
+    app: traceflow
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
