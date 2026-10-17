@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TraceFlow</title>
+<style>
+  :root {
+    --bg: #f3f4f6; --panel: #ffffff; --ink: #151821; --muted: #5f6675; --line: #e2e5ea;
+    --accent: #3451d1; --accent-bg: #e9edff;
+    --ok: #2b7a3d; --ok-bg: #e5f3e8;
+    --warn: #a65f00; --warn-bg: #fff1d6;
+    --err: #c0262d; --err-bg: #fde7e7;
+    --drop: #6c7480; --drop-bg: #eceef1;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1014; --panel: #161920; --ink: #e7e9ee; --muted: #9aa1ae; --line: #262a33;
+      --accent: #8098ff; --accent-bg: #1d2445;
+      --ok: #5fd27a; --ok-bg: #15301c;
+      --warn: #f5c04a; --warn-bg: #3a2d0c;
+      --err: #ff7272; --err-bg: #3e1719;
+      --drop: #a9b0bb; --drop-bg: #22262e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+
+  /* header */
+  .top { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+         padding: 14px 24px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand h1 { margin: 0; font-size: 18px; }
+  .brand p { margin: 0; color: var(--muted); font-size: 12px; }
+  .status { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; color: var(--muted); font-size: 12.5px; }
+  .live { display: inline-flex; align-items: center; gap: 6px; }
+  .live::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--drop); }
+  .live.ok::before { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
+  .live.down::before { background: var(--err); }
+  .banner { margin: 16px 24px 0; padding: 10px 14px; border-radius: 8px;
+            background: var(--err-bg); color: var(--err); font-weight: 600; }
+
+  main { padding: 16px 24px 40px; display: grid; gap: 16px; max-width: 1400px; margin: 0 auto; }
+
+  /* cards */
+  .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--line);
+          border-radius: 10px; padding: 14px 16px; }
+  .card.accent { border-top-color: var(--accent); }
+  .card.ok { border-top-color: var(--ok); }
+  .card.err { border-top-color: var(--err); }
+  .card.warn { border-top-color: var(--warn); }
+  .card .label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); font-weight: 600; }
+  .card .value { font-size: 28px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .card .sub { font-size: 12px; color: var(--muted); }
+
+  /* panels */
+  .grid2 { display: grid; gap: 16px; grid-template-columns: 3fr 2fr; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+  .panel h2 { margin: 0 0 2px; font-size: 15px; }
+  .panel h3 { margin: 18px 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+  .hint { margin: 0 0 12px; color: var(--muted); font-size: 12.5px; }
+  .panel-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 8px; }
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); padding: 14px 10px; }
+  .err-text { color: var(--err); font-weight: 600; }
+
+  /* sampling bar */
+  .funnel { display: flex; height: 26px; border-radius: 6px; overflow: hidden; background: var(--drop-bg); }
+  .seg { height: 100%; }
+  .legend { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 6px;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .legend li { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .legend b { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+  /* buttons */
+  .btn { font: inherit; font-weight: 600; padding: 9px 12px; border-radius: 8px; cursor: pointer;
+         border: 1px solid var(--line); background: var(--panel); color: var(--ink); text-align: left; }
+  .btn:hover { border-color: var(--accent); }
+  .btn:disabled { opacity: .5; cursor: progress; }
+  .demo-buttons { display: grid; gap: 8px; }
+  .demo-buttons .btn { border-left-width: 4px; }
+  .demo-buttons .btn small { display: block; font-weight: 400; color: var(--muted); }
+  .btn.d-normal { border-left-color: var(--ok); }
+  .btn.d-slow { border-left-color: var(--warn); }
+  .btn.d-fail { border-left-color: var(--err); }
+  .demo-result { margin-top: 12px; font-size: 13px; min-height: 40px; }
+  .btn.small { padding: 5px 10px; font-size: 12.5px; }
+  .chips { display: flex; gap: 6px; }
+  .chip.active { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+
+  /* tables */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted);
+       font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover { background: var(--bg); }
+  tr.selected, tr.selected:hover { background: var(--accent-bg); }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11.5px;
+           font-weight: 700; letter-spacing: .3px; white-space: nowrap; }
+  .b-SUCCESS { background: var(--ok-bg); color: var(--ok); }
+  .b-SLOW { background: var(--warn-bg); color: var(--warn); }
+  .b-ERROR { background: var(--err-bg); color: var(--err); }
+  .b-KEEP { background: var(--accent-bg); color: var(--accent); }
+  .b-DROP { background: var(--drop-bg); color: var(--drop); }
+  .reason { font-size: 12px; color: var(--muted); margin-left: 4px; }
+  .svc { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+  .path { display: flex; flex-wrap: wrap; gap: 2px 6px; align-items: center; }
+  .arrow { color: var(--muted); }
+
+  /* trace detail */
+  .why { padding: 10px 12px; border-radius: 8px; background: var(--accent-bg); margin: 10px 0 4px; }
+  .why.why-err { background: var(--err-bg); }
+  .why.why-warn { background: var(--warn-bg); }
+  .facts { display: grid; gap: 10px 16px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin: 14px 0 4px; }
+  .fact .k { font-size: 11.5px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); font-weight: 600; }
+  .fact .v { margin-top: 2px; }
+  .wf { display: grid; gap: 3px; }
+  .wf-row { display: grid; grid-template-columns: minmax(280px, 40%) 1fr 110px; align-items: center;
+            gap: 10px; padding: 5px 6px; border-radius: 6px; }
+  .wf-row.rc { background: var(--err-bg); }
+  .wf-row.bn { background: var(--warn-bg); }
+  .wf-axis { color: var(--muted); font-size: 11.5px; padding-top: 0; padding-bottom: 0; }
+  .wf-axis .ticks { display: flex; justify-content: space-between; }
+  .wf-label { display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; }
+  .wf-label .op { overflow: hidden; text-overflow: ellipsis; }
+  .kind { font-size: 10.5px; font-weight: 700; color: var(--muted); border: 1px solid var(--line);
+          border-radius: 4px; padding: 0 4px; }
+  .tag { font-size: 10.5px; font-weight: 800; letter-spacing: .4px; padding: 1px 6px; border-radius: 4px; color: #fff; }
+  .tag-err { background: var(--err); }
+  .tag-warn { background: var(--warn); }
+  .wf-track { position: relative; height: 14px; background: var(--bg); border-radius: 4px; }
+  .wf-bar { position: absolute; top: 0; height: 100%; border-radius: 4px; min-width: 2px; }
+  .wf-bar.err { background-image: repeating-linear-gradient(45deg, transparent 0 4px, rgba(255,255,255,.4) 4px 8px); }
+  .wf-dur { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .http { font-size: 11.5px; color: var(--muted); margin-left: 4px; }
+  .http.bad { color: var(--err); font-weight: 700; }
+  @media (max-width: 700px) {
+    .wf-row { grid-template-columns: 1fr 90px; }
+    .wf-label { grid-column: 1 / -1; }
+    .wf-axis .axis-label { display: none; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
+      <rect width="34" height="34" rx="8" fill="var(--accent)"/>
+      <path d="M8 11h9M17 11v6h9M17 17v6h5" stroke="#fff" stroke-width="2.2" fill="none" stroke-linecap="round"/>
+      <circle cx="8" cy="11" r="2.6" fill="#fff"/><circle cx="26" cy="17" r="2.6" fill="#fff"/><circle cx="22" cy="23" r="2.6" fill="#fff"/>
+    </svg>
+    <div>
+      <h1>TraceFlow</h1>
+      <p>Distributed tracing &middot; tail-based sampling</p>
+    </div>
+  </div>
+  <div class="status">
+    <span id="conn" class="live">Connecting&hellip;</span>
+    <span id="buffered">&ndash;</span>
+    <span id="threshold">&ndash;</span>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main>
+  <section class="cards" id="cards"></section>
+
+  <section class="grid2">
+    <div class="panel">
+      <h2>Sampling decisions</h2>
+      <p class="hint">Every completed trace is analyzed first, then kept or dropped (tail-based sampling).</p>
+      <div id="funnel"></div>
+    </div>
+    <div class="panel">
+      <h2>Demo scenarios</h2>
+      <p class="hint">Sends a real checkout request: User &rarr; Order &rarr; Payment.</p>
+      <div class="demo-buttons">
+        <button class="btn d-normal" data-demo="normal">Normal checkout<small>All services respond normally</small></button>
+        <button class="btn d-slow" data-demo="slow">Slow payment<small>Payment waits about 5 seconds</small></button>
+        <button class="btn d-fail" data-demo="fail">Payment failure<small>Payment returns HTTP 500</small></button>
+      </div>
+      <div id="demoResult" class="demo-result muted">Tip: send one normal request first as a warm-up.</div>
+      <button id="resetBtn" class="btn small">Reset all data</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Service performance</h2>
+    <p class="hint">Measured over all traces, including dropped ones. "Root cause" counts how often a service was where an error started.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Service</th><th class="num">Requests</th><th class="num">Avg latency</th>
+          <th class="num">Max latency</th><th class="num">Errors</th><th>Root cause</th>
+        </tr></thead>
+        <tbody id="serviceRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>Retained traces</h2>
+        <p class="hint">Only kept traces are stored. Click a trace to inspect its request journey.</p>
+      </div>
+      <div class="chips">
+        <button class="btn small chip active" data-filter="">All</button>
+        <button class="btn small chip" data-filter="ERROR">Errors</button>
+        <button class="btn small chip" data-filter="SLOW">Slow</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Trace ID</th><th>Services</th><th class="num">Duration</th>
+          <th>Status</th><th>Decision &middot; reason</th>
+        </tr></thead>
+        <tbody id="traceRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" id="detail"></section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const state = { filter: "", selected: null, summary: null, loading: false };
+  const DETAIL_EMPTY = '<h2>Trace detail</h2><p class="hint">Select a trace in the list above.</p>';
+
+  const KNOWN_COLORS = { "user-service": "#3451d1", "order-service": "#0b8a8a", "payment-service": "#d9480f" };
+  const PALETTE = ["#7048e8", "#2f9e44", "#c2255c", "#1971c2", "#e67700"];
+  function serviceColor(name) {
+    if (KNOWN_COLORS[name]) return KNOWN_COLORS[name];
+    let h = 0;
+    for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return PALETTE[h % PALETTE.length];
+  }
+  function esc(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+  function fmtMs(ms) {
+    if (ms === null || ms === undefined) return "\u2013";
+    return ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : Math.round(ms) + " ms";
+  }
+  function fmtTime(iso) {
+    const d = new Date(iso);
+    return isNaN(d) ? "\u2013" : d.toLocaleTimeString();
+  }
+  function svc(name) {
+    return `<span class="svc"><span class="dot" style="background:${serviceColor(name)}"></span>${esc(name)}</span>`;
+  }
+  function badge(text) {
+    if (!text) return "";
+    return `<span class="badge b-${esc(text)}">${esc(String(text).replace(/_/g, " "))}</span>`;
+  }
+  async function api(path, options) {
+    const response = await fetch(path, options);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const detail = typeof body.detail === "string" ? body.detail : response.statusText;
+      throw new Error(`${response.status} ${detail}`);
+    }
+    return response.json();
+  }
+
+  /* ---------------------------------------------------------- rendering */
+  function renderSummary(s) {
+    const t = s.latency_threshold_ms;
+    $("threshold").textContent = `Slow threshold: ${fmtMs(t)}`;
+    $("buffered").textContent = s.buffered_traces === 1
+      ? "1 trace waiting in buffer" : `${s.buffered_traces} traces waiting in buffer`;
+    const cards = [
+      ["Total traces", s.total_traces, "all completed traces", "accent"],
+      ["Retained traces", s.retained_traces, `${s.dropped_traces} dropped by sampling`, "ok"],
+      ["Error traces", s.error_traces, "always retained", "err"],
+      ["Slow traces", s.slow_traces, `total latency > ${fmtMs(t)}`, "warn"],
+      ["Average latency", fmtMs(s.average_latency_ms), "across all traces", ""],
+      ["Data reduction", `${s.trace_reduction_percent}%`, `${s.spans_kept} of ${s.spans_total} spans stored`, "accent"],
+    ];
+    $("cards").innerHTML = cards.map(([label, value, sub, cls]) =>
+      `<div class="card ${cls}"><div class="label">${esc(label)}</div>` +
+      `<div class="value">${esc(value)}</div><div class="sub">${esc(sub)}</div></div>`).join("");
+  }
+
+  function renderFunnel(s) {
+    const r = s.stored_by_reason || {};
+    const segments = [
+      ["Kept \u00b7 error", r.ERROR || 0, "var(--err)"],
+      ["Kept \u00b7 high latency", r.HIGH_LATENCY || 0, "var(--warn)"],
+      ["Kept \u00b7 incomplete trace", r.INCOMPLETE_TRACE || 0, "var(--accent)"],
+      ["Kept \u00b7 baseline sample", r.BASELINE_SAMPLE || 0, "var(--ok)"],
+      ["Dropped \u00b7 normal trace", s.dropped_traces || 0, "var(--drop)"],
+    ];
+    const total = segments.reduce((sum, seg) => sum + seg[1], 0);
+    if (!total) {
+      $("funnel").innerHTML = '<p class="empty">No completed traces yet. Use the demo buttons to send requests.</p>';
+      return;
+    }
+    const bar = segments.filter((seg) => seg[1] > 0).map(([label, n, color]) =>
+      `<div class="seg" style="width:${(n / total * 100).toFixed(2)}%;background:${color}" title="${esc(label)}: ${n}"></div>`).join("");
+    const legend = segments.map(([label, n, color]) =>
+      `<li><span class="dot" style="background:${color}"></span>${esc(label)}<b>${n}</b></li>`).join("");
+    $("funnel").innerHTML =
+      `<div class="funnel">${bar}</div><ul class="legend">${legend}</ul>` +
+      `<p class="hint" style="margin:12px 0 0">${s.dropped_traces} of ${s.total_traces} traces were healthy and dropped ` +
+      `(${s.trace_reduction_percent}% less trace data). Failed and slow traces are always kept.</p>`;
+  }
+
+  function renderServices(list) {
+    if (!list.length) {
+      $("serviceRows").innerHTML = '<tr><td colspan="6" class="empty">No data yet.</td></tr>';
+      return;
+    }
+    $("serviceRows").innerHTML = list.map((m) => `<tr>
+        <td>${svc(m.service_name)}</td>
+        <td class="num">${m.requests}</td>
+        <td class="num">${fmtMs(m.avg_latency_ms)}</td>
+        <td class="num">${fmtMs(m.max_latency_ms)}</td>
+        <td class="num">${m.errors} <span class="muted">(${m.error_rate_percent}%)</span></td>
+        <td>${m.root_cause_count ? `<span class="badge b-ERROR">root cause &times;${m.root_cause_count}</span>` : '<span class="muted">\u2013</span>'}</td>
+      </tr>`).join("");
+  }
+
+  function renderTraces(list) {
+    if (!list.length) {
+      const msg = state.filter ? "No retained traces with this status yet."
+                               : "No retained traces yet \u2013 send a slow or failed request.";
+      $("traceRows").innerHTML = `<tr><td colspan="6" class="empty">${msg}</td></tr>`;
+      return;
+    }
+    $("traceRows").innerHTML = list.map((t) => `
+      <tr class="clickable ${t.trace_id === state.selected ? "selected" : ""}" data-id="${esc(t.trace_id)}">
+        <td>${fmtTime(t.timestamp)}</td>
+        <td class="mono">${esc(t.trace_id.slice(0, 12))}&hellip;</td>
+        <td><div class="path">${t.services.length ? t.services.map((name) => svc(name)).join('<span class="arrow">&rarr;</span>') : "\u2013"}</div></td>
+        <td class="num">${fmtMs(t.total_latency_ms)}</td>
+        <td>${badge(t.status)}</td>
+        <td>${badge(t.decision)}<span class="reason">${esc(t.reason)}</span></td>
+      </tr>`).join("");
+  }
+
+  function explain(t) {
+    const threshold = state.summary ? state.summary.latency_threshold_ms : null;
+    if (t.reason === "ERROR") {
+      const http = t.root_cause_http_status ? `, HTTP ${t.root_cause_http_status}` : "";
+      return `<b>Kept because the trace contains failed spans.</b> The error started in ` +
+             `<b>${esc(t.root_cause_service)}</b> (${esc(t.root_cause_operation)}${http}) and propagated to the services above it.`;
+    }
+    if (t.reason === "HIGH_LATENCY") {
+      return `<b>Kept because the total latency of ${fmtMs(t.total_latency_ms)} exceeded the slow threshold` +
+             `${threshold ? " of " + fmtMs(threshold) : ""}.</b> Bottleneck: <b>${esc(t.bottleneck_service)}</b> ` +
+             `(${fmtMs(t.bottleneck_self_time_ms)} of its own work).`;
+    }
+    if (t.reason === "INCOMPLETE_TRACE") {
+      return "<b>Kept because some spans of this trace never arrived</b> (possible crash or lost telemetry).";
+    }
+    if (t.reason === "BASELINE_SAMPLE") {
+      return "<b>Healthy trace kept as part of the baseline sample.</b>";
+    }
+    return esc(t.reason);
+  }
+
+  function renderDetail(t) {
+    const total = Math.max(t.total_latency_ms, 0.001);
+    const t0 = t.start_time_ns;
+    const facts = [
+      ["Status", badge(t.status)],
+      ["Decision", `${badge(t.decision)} <span class="reason">${esc(t.reason)}</span>`],
+      ["Total latency", fmtMs(t.total_latency_ms)],
+      ["Bottleneck", t.bottleneck_service
+        ? `${svc(t.bottleneck_service)} <span class="muted">${fmtMs(t.bottleneck_self_time_ms)} own work</span>` : "\u2013"],
+      ["Root cause", t.root_cause_service
+        ? `${svc(t.root_cause_service)} <span class="muted">HTTP ${esc(t.root_cause_http_status ?? "?")}</span>` : "\u2013"],
+      ["Network / wait", fmtMs(t.network_ms)],
+      ["Spans", `${t.span_count}${t.is_complete ? "" : " (incomplete)"}`],
+      ["Started", fmtTime(t.timestamp)],
+    ];
+    const axis = `<div class="wf-row wf-axis"><div class="axis-label">Service &middot; span</div>` +
+      `<div class="ticks"><span>0</span><span>${fmtMs(total / 2)}</span><span>${fmtMs(total)}</span></div>` +
+      `<div class="wf-dur">Duration</div></div>`;
+    const rows = t.spans.map((s) => {
+      const offset = (s.start_time_ns - t0) / 1e6;
+      const left = Math.min(Math.max(offset / total * 100, 0), 100);
+      const width = Math.min(Math.max(s.duration_ms / total * 100, 0.4), 100 - left);
+      const isRootCause = s.status_code === "ERROR" && s.service_name === t.root_cause_service
+                          && s.name === t.root_cause_operation;
+      const isBottleneck = t.status !== "ERROR" && s.kind === "SERVER" && s.service_name === t.bottleneck_service;
+      const tag = isRootCause ? '<span class="tag tag-err">ROOT CAUSE</span>'
+                : isBottleneck ? '<span class="tag tag-warn">BOTTLENECK</span>' : "";
+      const http = s.http_status_code
+        ? `<span class="http ${s.http_status_code >= 500 ? "bad" : ""}">${s.http_status_code}</span>` : "";
+      return `<div class="wf-row ${isRootCause ? "rc" : isBottleneck ? "bn" : ""}">
+          <div class="wf-label" style="padding-left:${s.depth * 16}px" title="${esc(s.service_name)} ${esc(s.kind)} ${esc(s.name)}">
+            ${svc(s.service_name)}${tag}<span class="kind">${esc(s.kind)}</span><span class="op">${esc(s.name)}</span>
+          </div>
+          <div class="wf-track"><div class="wf-bar ${s.status_code === "ERROR" ? "err" : ""}"
+               style="left:${left}%;width:${width}%;background:${serviceColor(s.service_name)}"></div></div>
+          <div class="wf-dur">${fmtMs(s.duration_ms)}${http}</div>
+        </div>`;
+    }).join("");
+    const whyClass = t.reason === "ERROR" ? "why-err" : t.reason === "HIGH_LATENCY" ? "why-warn" : "";
+    const rules = t.matched_rules.length > 1
+      ? `<div class="muted" style="margin-top:4px">Matched rules: ${esc(t.matched_rules.join(", "))}</div>` : "";
+    $("detail").innerHTML =
+      `<h2>Trace detail</h2><p class="hint mono">${esc(t.trace_id)}</p>` +
+      `<div class="why ${whyClass}">${explain(t)}${rules}</div>` +
+      `<div class="facts">${facts.map(([k, v]) => `<div class="fact"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("")}</div>` +
+      `<h3>Request journey</h3><div class="wf">${axis}${rows}</div>`;
+  }
+
+  /* ----------------------------------------------------------- actions */
+  async function refresh() {
+    if (state.loading) return;
+    state.loading = true;
+    try {
+      const statusQuery = state.filter ? `&status=${state.filter}` : "";
+      const [summary, services, traces] = await Promise.all([
+        api("/api/summary"),
+        api("/api/services"),
+        api(`/api/traces?limit=50${statusQuery}`),
+      ]);
+      state.summary = summary;
+      renderSummary(summary);
+      renderFunnel(summary);
+      renderServices(services);
+      renderTraces(traces);
+      $("conn").className = "live ok";
+      $("conn").textContent = "Live \u00b7 updated " + new Date().toLocaleTimeString();
+      $("banner").hidden = true;
+    } catch (e) {
+      $("conn").className = "live down";
+      $("conn").textContent = "Disconnected";
+      $("banner").hidden = false;
+      $("banner").textContent = "Cannot reach the TraceFlow API: " + e.message;
+    } finally {
+      state.loading = false;
+    }
+  }
+
+  async function selectTrace(id) {
+    state.selected = id;
+    document.querySelectorAll("#traceRows tr[data-id]").forEach((tr) =>
+      tr.classList.toggle("selected", tr.dataset.id === id));
+    $("detail").innerHTML = '<h2>Trace detail</h2><p class="hint">Loading&hellip;</p>';
+    try {
+      renderDetail(await api(`/api/traces/${encodeURIComponent(id)}`));
+      $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (e) {
+      $("detail").innerHTML = `<h2>Trace detail</h2><p class="hint">${esc(e.message)}</p>`;
+    }
+  }
+
+  const DEMO_INFO = {
+    normal: ["Normal checkout", "Watch for: DROP \u00b7 NORMAL_TRACE \u2013 it is counted, but not stored in the list."],
+    slow:   ["Slow payment", "Watch for: KEEP \u00b7 HIGH_LATENCY with payment-service as the bottleneck."],
+    fail:   ["Payment failure", "Watch for: KEEP \u00b7 ERROR with payment-service as the root cause."],
+  };
+
+  async function runDemo(mode) {
+    const [label, hint] = DEMO_INFO[mode];
+    const buttons = document.querySelectorAll("[data-demo]");
+    buttons.forEach((b) => (b.disabled = true));
+    $("demoResult").className = "demo-result";
+    $("demoResult").innerHTML = `Sending <b>${esc(label)}</b> request&hellip;`;
+    try {
+      const r = await api(`/api/demo/checkout?mode=${mode}`, { method: "POST" });
+      $("demoResult").innerHTML =
+        `<b>${esc(label)}</b>: HTTP ${r.http_status} in ${fmtMs(r.duration_ms)}.<br>` +
+        `The trace now waits in the buffer until it is complete (about 10\u201315 s).<br>` +
+        `<span class="muted">${esc(hint)}</span>`;
+    } catch (e) {
+      $("demoResult").innerHTML = `<span class="err-text">Demo request failed: ${esc(e.message)}</span>`;
+    } finally {
+      buttons.forEach((b) => (b.disabled = false));
+      refresh();
+    }
+  }
+
+  /* ------------------------------------------------------------ wiring */
+  $("detail").innerHTML = DETAIL_EMPTY;
+  $("traceRows").addEventListener("click", (e) => {
+    const row = e.target.closest("tr[data-id]");
+    if (row) selectTrace(row.dataset.id);
+  });
+  document.querySelectorAll("[data-filter]").forEach((button) =>
+    button.addEventListener("click", () => {
+      state.filter = button.dataset.filter;
+      document.querySelectorAll("[data-filter]").forEach((b) => b.classList.toggle("active", b === button));
+      refresh();
+    }));
+  document.querySelectorAll("[data-demo]").forEach((button) =>
+    button.addEventListener("click", () => runDemo(button.dataset.demo)));
+  $("resetBtn").addEventListener("click", async () => {
+    if (!confirm("Delete all stored traces and counters?")) return;
+    try {
+      await api("/api/reset", { method: "POST" });
+      state.selected = null;
+      $("detail").innerHTML = DETAIL_EMPTY;
+      refresh();
+    } catch (e) {
+      alert("Reset failed: " + e.message);
+    }
+  });
+
+  refresh();
+  setInterval(refresh, 3000);
+</script>
+</body>
+</html>

@@ -1,0 +1,122 @@
+# TraceFlow CI/CD pipeline
+#
+#   git push
+#     -> test  : install dependencies + run the automated tests (4 components in parallel)
+#     -> build : validate docker-compose.yml, build all Docker images, start the whole
+#                stack and run an end-to-end smoke test (normal / slow / fail),
+#                then (main branch only) push the images to GitHub Container Registry.
+#   Deployment to Kubernetes: see kubernetes/ and the README.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:          # allows a manual run from the Actions tab
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - services/user-service
+          - services/order-service
+          - services/payment-service
+          - traceflow
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            ${{ matrix.component }}/requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ${{ matrix.component }}/requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest ${{ matrix.component }} -v
+
+  build:
+    name: Build images + end-to-end smoke test
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write         # needed to push images to GitHub Container Registry
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
+
+      - name: Build all Docker images
+        run: docker compose build
+
+      - name: Start the full stack
+        run: docker compose up -d --wait --wait-timeout 120
+
+      - name: End-to-end smoke test (normal, slow, fail)
+        run: |
+          set -euo pipefail
+          for mode in normal slow fail; do
+            echo "Sending $mode checkout..."
+            curl -fsS -X POST "http://localhost:8000/api/demo/checkout?mode=$mode"
+            echo
+          done
+
+          echo "Waiting for TraceFlow to buffer, analyze and sample the traces..."
+          for i in $(seq 1 30); do
+            total=$(curl -fsS http://localhost:8000/api/summary | jq '.total_traces')
+            if [ "$total" -ge 3 ]; then break; fi
+            sleep 2
+          done
+
+          summary=$(curl -fsS http://localhost:8000/api/summary)
+          echo "$summary" | jq .
+          test "$(echo "$summary" | jq '.total_traces')" -eq 3
+          test "$(echo "$summary" | jq '.retained_traces')" -eq 2
+          test "$(echo "$summary" | jq '.error_traces')" -eq 1
+          test "$(echo "$summary" | jq '.slow_traces')" -eq 1
+          echo "Smoke test passed: normal trace dropped, slow + error traces kept."
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push images to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          short_sha=$(echo "$GITHUB_SHA" | cut -c1-7)
+          for image in traceflow-user-service traceflow-order-service traceflow-payment-service traceflow-engine; do
+            for tag in latest "$short_sha"; do
+              docker tag "$image:latest" "ghcr.io/$owner/$image:$tag"
+              docker push "ghcr.io/$owner/$image:$tag"
+            done
+          done

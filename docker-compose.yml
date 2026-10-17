@@ -1,0 +1,108 @@
+# TraceFlow - complete local environment
+# Start:  docker compose up --build
+# Stop:   docker compose down        (add -v to also delete stored traces)
+
+name: traceflow
+
+x-service-health: &service-health
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 10s
+
+services:
+  # ------------------------------------------------ TraceFlow engine + dashboard
+  traceflow:
+    build: ./traceflow
+    image: traceflow-engine:latest
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LATENCY_THRESHOLD_MS: ${LATENCY_THRESHOLD_MS:-2000}
+      TRACE_IDLE_TIMEOUT_SECONDS: ${TRACE_IDLE_TIMEOUT_SECONDS:-10}
+      BASELINE_SAMPLE_RATE: ${BASELINE_SAMPLE_RATE:-0.0}
+      KEEP_INCOMPLETE_TRACES: "true"
+      TRACEFLOW_DB_PATH: /data/traceflow.db
+      DEMO_CHECKOUT_URL: http://user-service:8001/users/1/checkout
+    ports:
+      - "8000:8000"
+    volumes:
+      - traceflow-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      <<: *service-health
+    restart: unless-stopped
+
+  # ------------------------------------------------ OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector:0.111.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel/collector-config.yaml:/etc/otelcol/config.yaml:ro
+    environment:
+      TRACEFLOW_ENDPOINT: http://traceflow:8000
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      traceflow:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------ Microservices
+  payment-service:
+    build: ./services/payment-service
+    image: traceflow-payment-service:latest
+    environment: &otel-env
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TRACE_EXPORTER: otlp
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector:4318/v1/traces
+      OTEL_BSP_SCHEDULE_DELAY: "1000"     # export spans every 1 s instead of 5 s
+      DEPLOYMENT_ENV: docker
+      SERVICE_NAME: payment-service
+      PAYMENT_SLOW_DELAY_SECONDS: ${PAYMENT_SLOW_DELAY_SECONDS:-5}
+    ports:
+      - "8003:8003"
+    depends_on:
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health', timeout=3)"]
+      <<: *service-health
+    restart: unless-stopped
+
+  order-service:
+    build: ./services/order-service
+    image: traceflow-order-service:latest
+    environment:
+      <<: *otel-env
+      SERVICE_NAME: order-service
+      PAYMENT_SERVICE_URL: http://payment-service:8003
+    ports:
+      - "8002:8002"
+    depends_on:
+      payment-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3)"]
+      <<: *service-health
+    restart: unless-stopped
+
+  user-service:
+    build: ./services/user-service
+    image: traceflow-user-service:latest
+    environment:
+      <<: *otel-env
+      SERVICE_NAME: user-service
+      ORDER_SERVICE_URL: http://order-service:8002
+    ports:
+      - "8001:8001"
+    depends_on:
+      order-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      <<: *service-health
+    restart: unless-stopped
+
+volumes:
+  traceflow-data:

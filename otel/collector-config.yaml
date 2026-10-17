@@ -1,0 +1,29 @@
+# OpenTelemetry Collector configuration for TraceFlow
+# Receives spans from the microservices via OTLP, batches them,
+# and forwards them to the TraceFlow engine.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318   # services send OTLP/HTTP here
+
+processors:
+  batch:
+    timeout: 1s
+
+exporters:
+  debug:
+    verbosity: basic             # short summary per batch
+  otlphttp/traceflow:
+    # Set by docker-compose / Kubernetes, e.g. http://traceflow:8000
+    endpoint: ${env:TRACEFLOW_ENDPOINT}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, otlphttp/traceflow]
